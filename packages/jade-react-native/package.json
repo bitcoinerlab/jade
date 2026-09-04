@@ -1,0 +1,50 @@
+{
+  "name": "@bitcoinerlab/jade-react-native",
+  "version": "0.1.0",
+  "description": "React Native BLE and Android USB provider for Blockstream Jade.",
+  "homepage": "https://github.com/bitcoinerlab/jade",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bitcoinerlab/jade.git",
+    "directory": "packages/jade-react-native"
+  },
+  "bugs": "https://github.com/bitcoinerlab/jade/issues",
+  "author": "Jose-Luis Landabaso",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./app.plugin": "./app.plugin.cjs"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "android",
+    "app.plugin.cjs",
+    "expo-module.config.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc --project tsconfig.json",
+    "check": "tsc --project tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run check && node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "@bitcoinerlab/jade": "^0.1.0",
+    "@scure/base": "^2.0.0"
+  },
+  "peerDependencies": {
+    "expo-modules-core": ">=2.0.0",
+    "react-native": ">=0.76.0",
+    "react-native-ble-plx": ">=3.2.0"
+  }
+}

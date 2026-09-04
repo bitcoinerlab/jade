@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
+
+# Native build outputs
+packages/jade-react-native/android/build/
+packages/jade-react-native/android/.gradle/

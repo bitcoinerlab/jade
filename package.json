@@ -1,0 +1,26 @@
+{
+  "name": "bitcoinerlab-jade-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "prettier": "@bitcoinerlab/configs/prettierConfig.json",
+  "eslintConfig": {
+    "extends": "./node_modules/@bitcoinerlab/configs/eslintConfig"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "lint": "NODE_NO_WARNINGS=1 ESLINT_USE_FLAT_CONFIG=false eslint --ignore-path .gitignore --ext .ts packages/*/src packages/*/test",
+    "test": "npm run lint && npm run test --workspaces --if-present",
+    "format:check": "prettier --check \"packages/**/*.{ts,js,cjs,json,md}\" \"*.{json,md}\"",
+    "format": "prettier --write \"packages/**/*.{ts,js,cjs,json,md}\" \"*.{json,md}\""
+  },
+  "devDependencies": {
+    "@bitcoinerlab/configs": "^2.0.0",
+    "@types/node": "^24.3.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

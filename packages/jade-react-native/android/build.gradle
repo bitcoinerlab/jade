@@ -1,0 +1,38 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'com.bitcoinerlab.jadereactnative'
+version = '0.1.0'
+
+def safeExtGet(prop, fallback) {
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+def expoModulesCorePlugin = new File(
+  project(':expo-modules-core').projectDir.absolutePath,
+  'ExpoModulesCorePlugin.gradle'
+)
+
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+
+android {
+  namespace 'com.bitcoinerlab.jadereactnative'
+  compileSdkVersion safeExtGet('compileSdkVersion', 35)
+
+  defaultConfig {
+    minSdkVersion safeExtGet('minSdkVersion', 23)
+    targetSdkVersion safeExtGet('targetSdkVersion', 35)
+  }
+}
+
+repositories {
+  maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+  implementation('com.github.mik3y:usb-serial-for-android:3.11.0') {
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib'
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "@bitcoinerlab/jade",
+  "version": "0.1.0",
+  "description": "Blockstream Jade client for browser Web Serial and Node serial/TCP applications.",
+  "homepage": "https://github.com/bitcoinerlab/jade",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bitcoinerlab/jade.git",
+    "directory": "packages/jade"
+  },
+  "bugs": "https://github.com/bitcoinerlab/jade/issues",
+  "author": "Jose-Luis Landabaso",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./webserial": {
+      "types": "./dist/webserial.d.ts",
+      "default": "./dist/webserial.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc --project tsconfig.json",
+    "check": "tsc --project tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run check && node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "@cto.af/wtf8": "0.0.5",
+    "@noble/hashes": "^2.0.1",
+    "@scure/base": "^2.0.0",
+    "cbor2": "^2.3.0"
+  },
+  "peerDependencies": {
+    "serialport": "^13.0.0"
+  },
+  "peerDependenciesMeta": {
+    "serialport": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "serialport": "^13.0.0"
+  }
+}
