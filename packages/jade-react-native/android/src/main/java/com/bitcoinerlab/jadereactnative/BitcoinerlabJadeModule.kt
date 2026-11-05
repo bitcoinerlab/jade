@@ -57,6 +57,20 @@ private fun usbDevice(intent: Intent): UsbDevice? =
     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE) as? UsbDevice
   }
 
+internal fun usbPermissionPendingIntent(context: Context, deviceId: Int): PendingIntent {
+  val intent = Intent("${context.packageName}.bitcoinerlab.jade.USB_PERMISSION")
+    .setPackage(context.packageName)
+  // UsbManager fills in EXTRA_DEVICE and EXTRA_PERMISSION_GRANTED when sending.
+  val mutability = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    PendingIntent.FLAG_MUTABLE
+  } else {
+    0
+  }
+  return PendingIntent.getBroadcast(
+    context, deviceId, intent, mutability or PendingIntent.FLAG_UPDATE_CURRENT
+  )
+}
+
 private fun ensureUsbPermission(
   context: Context,
   usbManager: UsbManager,
@@ -83,20 +97,15 @@ private fun ensureUsbPermission(
     @Suppress("DEPRECATION")
     context.registerReceiver(receiver, filter)
   }
+  val pendingIntent = usbPermissionPendingIntent(context, device.deviceId)
   try {
-    val permissionIntent = Intent(action).setPackage(context.packageName)
-    val pendingIntent = PendingIntent.getBroadcast(
-      context,
-      device.deviceId,
-      permissionIntent,
-      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-    )
     usbManager.requestPermission(device, pendingIntent)
     if (!latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)) {
       throw JadeNativeException("Timed out waiting for Jade USB permission")
     }
     if (!granted) throw JadeNativeException("Jade USB permission was denied")
   } finally {
+    pendingIntent.cancel()
     try {
       context.unregisterReceiver(receiver)
     } catch (_: Throwable) {}

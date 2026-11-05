@@ -46,12 +46,16 @@ type BleDeviceHandle = {
 };
 
 type BleManagerHandle = {
+  onStateChange(
+    listener: (state: string) => void,
+    emitCurrentState: boolean
+  ): NativeSubscription;
   startDeviceScan(
     serviceUUIDs: string[] | null,
     options: null,
     listener: (error: BleError | null, device: BleDeviceHandle | null) => void
-  ): void;
-  stopDeviceScan(): void;
+  ): void | Promise<void>;
+  stopDeviceScan(): void | Promise<void>;
   connectToDevice(
     deviceId: string,
     options?: { timeout?: number }
@@ -65,7 +69,10 @@ type BleManagerHandle = {
 };
 
 type BlePlxRequire = (specifier: string) => {
-  BleManager: new () => BleManagerHandle;
+  BleManager: {
+    new (): BleManagerHandle;
+    sharedInstance?: BleManagerHandle | null;
+  };
 };
 
 type ReactNativeRuntime = {
@@ -84,9 +91,11 @@ type ReactNativeRuntime = {
 declare const require: BlePlxRequire &
   ((specifier: 'react-native') => ReactNativeRuntime);
 
-function bleManager(): BleManagerHandle {
+function bleManager(): { manager: BleManagerHandle; ownsManager: boolean } {
   try {
-    return new (require('react-native-ble-plx').BleManager)();
+    const { BleManager } = require('react-native-ble-plx');
+    const shared = BleManager.sharedInstance;
+    return { manager: shared ?? new BleManager(), ownsManager: !shared };
   } catch (error) {
     throw new Error('Jade BLE requires react-native-ble-plx', { cause: error });
   }
@@ -124,6 +133,32 @@ function jadeDevice(device: BleDeviceHandle): JadeBleDevice | undefined {
   };
 }
 
+async function waitForBluetooth(
+  manager: BleManagerHandle,
+  timeoutMs: number
+): Promise<void> {
+  let subscription: NativeSubscription | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('Timed out waiting for Bluetooth')),
+        timeoutMs
+      );
+      subscription = manager.onStateChange(state => {
+        if (state === 'PoweredOn') resolve();
+        else if (state === 'PoweredOff')
+          reject(new Error('Bluetooth is powered off'));
+        else if (state === 'Unauthorized' || state === 'Unsupported')
+          reject(new Error(`Bluetooth is ${state.toLowerCase()}`));
+      }, true);
+    });
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    subscription?.remove();
+  }
+}
+
 export async function discoverJadeBleDevices(
   options: JadeBleDiscoveryOptions = {}
 ): Promise<JadeBleDevice[]> {
@@ -131,33 +166,39 @@ export async function discoverJadeBleDevices(
   const scanDurationMs = options.scanDurationMs ?? 5_000;
   if (!Number.isSafeInteger(scanDurationMs) || scanDurationMs <= 0)
     throw new Error('Jade BLE scan duration must be a positive integer');
-  const manager = bleManager();
+  const { manager, ownsManager } = bleManager();
   const devices = new Map<string, JadeBleDevice>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    await waitForBluetooth(manager, DEFAULT_TIMEOUT_MS);
     return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        manager.stopDeviceScan();
-        resolve([...devices.values()]);
-      }, scanDurationMs);
-      manager.startDeviceScan(null, null, (error, device) => {
-        if (error) {
-          clearTimeout(timer);
-          manager.stopDeviceScan();
-          reject(new Error(error.message ?? 'Jade BLE scan failed'));
-          return;
-        }
-        if (!device) return;
-        const discovered = jadeDevice(device);
-        if (discovered) devices.set(discovered.deviceId, discovered);
-      });
+      timer = setTimeout(() => resolve([...devices.values()]), scanDurationMs);
+      void Promise.resolve()
+        .then(() =>
+          manager.startDeviceScan(null, null, (error, device) => {
+            if (error) {
+              reject(new Error(error.message ?? 'Jade BLE scan failed'));
+              return;
+            }
+            if (!device) return;
+            const discovered = jadeDevice(device);
+            if (discovered) devices.set(discovered.deviceId, discovered);
+          })
+        )
+        .catch(reject);
     });
   } finally {
-    await manager.destroy().catch(() => undefined);
+    if (timer !== undefined) clearTimeout(timer);
+    await Promise.resolve()
+      .then(() => manager.stopDeviceScan())
+      .catch(() => undefined);
+    if (ownsManager) await manager.destroy().catch(() => undefined);
   }
 }
 
 class ReactNativeBleTransport implements JadeTransport {
   private readonly manager: BleManagerHandle;
+  private readonly ownsManager: boolean;
   private readonly device: BleDeviceHandle;
   private readonly writeSize: number;
   private listener: JadeTransportListener | undefined;
@@ -165,8 +206,13 @@ class ReactNativeBleTransport implements JadeTransport {
   private disconnection: NativeSubscription | undefined;
   private closed = false;
 
-  constructor(manager: BleManagerHandle, device: BleDeviceHandle) {
+  constructor(
+    manager: BleManagerHandle,
+    device: BleDeviceHandle,
+    ownsManager: boolean
+  ) {
     this.manager = manager;
+    this.ownsManager = ownsManager;
     this.device = device;
     this.writeSize = Math.max(20, Math.min(509, device.mtu - 3));
   }
@@ -219,7 +265,7 @@ class ReactNativeBleTransport implements JadeTransport {
     await this.manager
       .cancelDeviceConnection(this.device.id)
       .catch(() => undefined);
-    await this.manager.destroy().catch(() => undefined);
+    if (this.ownsManager) await this.manager.destroy().catch(() => undefined);
   }
 
   private removeListeners(): void {
@@ -236,6 +282,8 @@ export async function connectJadeBle(
   options: JadeReactNativeConnectOptions<JadeReactNativeDevice> = {}
 ): Promise<ConnectedJadeClient> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
+    throw new Error('Jade timeout must be a positive integer');
   if (options.device?.transport === 'usb')
     throw new Error('Jade BLE connection requires a BLE device');
   let selected = options.device;
@@ -249,18 +297,27 @@ export async function connectJadeBle(
   }
   if (!selected) throw new Error('No Jade BLE device found');
 
-  const manager = bleManager();
+  const { manager, ownsManager } = bleManager();
+  let connected = false;
   try {
+    await waitForBluetooth(manager, timeoutMs);
     let device = await manager.connectToDevice(selected.deviceId, {
       timeout: timeoutMs
     });
+    connected = true;
     if (device.requestMTU) {
       device = await device.requestMTU(517).catch(() => device);
     }
     device = await device.discoverAllServicesAndCharacteristics();
-    return createJadeClient(new ReactNativeBleTransport(manager, device));
+    return createJadeClient(
+      new ReactNativeBleTransport(manager, device, ownsManager)
+    );
   } catch (error) {
-    await manager.destroy().catch(() => undefined);
+    if (connected)
+      await manager
+        .cancelDeviceConnection(selected.deviceId)
+        .catch(() => undefined);
+    if (ownsManager) await manager.destroy().catch(() => undefined);
     throw error;
   }
 }

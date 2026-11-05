@@ -264,6 +264,161 @@ describe('JadeClient', () => {
     assert.equal(transport.closed, true);
   });
 
+  it(
+    'times out even when the transport write never finishes',
+    { timeout: 1_000 },
+    async () => {
+      const transport = new FakeTransport();
+      transport.onRequest = () => new Promise(() => {});
+      const rpc = new JadeRpc(transport);
+      const first = rpc.call('ping', undefined, 10);
+      const queued = rpc.call('next');
+
+      await Promise.all([
+        assert.rejects(first, /ping timed out/),
+        assert.rejects(queued, /transport is closed/)
+      ]);
+      assert.equal(transport.closed, true);
+      assert.equal(transport.requests.length, 1);
+    }
+  );
+
+  it(
+    'disconnects a request whose write is still pending',
+    { timeout: 1_000 },
+    async () => {
+      const transport = new FakeTransport();
+      let started!: () => void;
+      const writing = new Promise<void>(resolve => {
+        started = resolve;
+      });
+      transport.onRequest = () => {
+        started();
+        return new Promise(() => {});
+      };
+      const rpc = new JadeRpc(transport);
+      const rejected = assert.rejects(
+        rpc.call('ping', undefined, null),
+        /transport closed/
+      );
+      await writing;
+      await rpc.disconnect();
+      await rejected;
+      assert.equal(transport.closed, true);
+    }
+  );
+
+  it('closes a failed write before accepting another operation', async () => {
+    const transport = new FakeTransport();
+    transport.onRequest = () => {
+      throw new Error('write failed');
+    };
+    const rpc = new JadeRpc(transport);
+
+    await assert.rejects(rpc.call('ping'), /write failed/);
+    await assert.rejects(rpc.call('next'), /transport is closed/);
+    assert.equal(transport.closed, true);
+    assert.equal(transport.requests.length, 1);
+  });
+
+  it(
+    'handles a device error before the write finishes',
+    { timeout: 1_000 },
+    async () => {
+      const transport = new FakeTransport();
+      transport.onRequest = request => {
+        transport.respond({
+          id: request.id,
+          error: { code: -32000, message: 'User cancelled' }
+        });
+        return new Promise(() => {});
+      };
+      const client = new JadeClient(transport);
+
+      await assert.rejects(client.getVersionInfo(), /User cancelled/);
+      await client.disconnect();
+    }
+  );
+
+  it(
+    'keeps the timeout active until a successful response and write finish',
+    { timeout: 1_000 },
+    async () => {
+      const transport = new FakeTransport();
+      transport.onRequest = request => {
+        transport.respond({ id: request.id, result: true });
+        return new Promise(() => {});
+      };
+      const rpc = new JadeRpc(transport);
+
+      await assert.rejects(rpc.call('ping', undefined, 10), /ping timed out/);
+      assert.equal(transport.closed, true);
+    }
+  );
+
+  it(
+    'disconnects after receiving a response while its write is still pending',
+    { timeout: 1_000 },
+    async () => {
+      const transport = new FakeTransport();
+      let responded!: () => void;
+      const received = new Promise<void>(resolve => {
+        responded = resolve;
+      });
+      transport.onRequest = request => {
+        transport.respond({ id: request.id, result: true });
+        responded();
+        return new Promise(() => {});
+      };
+      const rpc = new JadeRpc(transport);
+      const rejected = assert.rejects(
+        rpc.call('ping', undefined, null),
+        /transport closed/
+      );
+      await received;
+      await rpc.disconnect();
+      await rejected;
+    }
+  );
+
+  it('does not overlap a queued write after an early device error', async () => {
+    const transport = new FakeTransport();
+    transport.onRequest = request => {
+      transport.respond({
+        id: request.id,
+        error: { code: -32000, message: 'User cancelled' }
+      });
+      return new Promise(() => {});
+    };
+    const rpc = new JadeRpc(transport);
+
+    await Promise.all([
+      assert.rejects(rpc.call('ping'), /User cancelled/),
+      assert.rejects(rpc.call('next'), /transport is closed/)
+    ]);
+    assert.equal(transport.requests.length, 1);
+  });
+
+  it('waits for transport cleanup after a timeout', async () => {
+    const transport = new FakeTransport();
+    let finishClose!: () => void;
+    transport.close = () =>
+      new Promise<void>(resolve => {
+        finishClose = resolve;
+      });
+    const rpc = new JadeRpc(transport);
+    await assert.rejects(rpc.call('ping', undefined, 10), /timed out/);
+    let disconnected = false;
+    const closing = rpc.disconnect().then(() => {
+      disconnected = true;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(disconnected, false);
+    finishClose();
+    await closing;
+    assert.equal(disconnected, true);
+  });
+
   it('loads without native TextEncoder or TextDecoder globals', () => {
     const result = spawnSync(
       process.execPath,

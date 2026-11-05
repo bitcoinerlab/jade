@@ -24,6 +24,10 @@ android {
     minSdkVersion safeExtGet('minSdkVersion', 23)
     targetSdkVersion safeExtGet('targetSdkVersion', 35)
   }
+
+  testOptions {
+    unitTests.includeAndroidResources = true
+  }
 }
 
 repositories {
@@ -35,4 +39,6 @@ dependencies {
   implementation('com.github.mik3y:usb-serial-for-android:3.11.0') {
     exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib'
   }
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.robolectric:robolectric:4.14.1'
 }

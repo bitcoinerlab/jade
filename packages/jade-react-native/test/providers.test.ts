@@ -2,7 +2,11 @@ import { base64 } from '@scure/base';
 import { decode, encode } from 'cbor2';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { connectJadeBle, connectJadeUsb } from '../src/index.js';
+import {
+  connectJadeBle,
+  connectJadeUsb,
+  discoverJadeBleDevices
+} from '../src/index.js';
 
 type Request = { id: string; method: string };
 type Event = {
@@ -79,6 +83,8 @@ describe('React Native Jade providers', () => {
       | undefined;
     let cancelled = '';
     let destroyed = false;
+    const writes: number[] = [];
+    let received = Buffer.alloc(0);
     const subscription = { remove() {} };
     const device = {
       id: 'ble-device',
@@ -103,15 +109,40 @@ describe('React Native Jade providers', () => {
         _characteristic: string,
         data: string
       ) {
-        const request = decode<Request>(base64.decode(data));
+        const chunk = base64.decode(data);
+        writes.push(chunk.length);
+        received = Buffer.concat([received, chunk]);
+        let request: Request;
+        try {
+          request = decode<Request>(received);
+        } catch (error) {
+          if (
+            error instanceof RangeError ||
+            (error instanceof Error &&
+              error.message.startsWith('Unexpected end of stream'))
+          )
+            return;
+          throw error;
+        }
+        received = Buffer.alloc(0);
         notification?.(null, {
           value: base64.encode(
-            encode({ id: request.id, result: { JADE_VERSION: 'ble-test' } })
+            encode({
+              id: request.id,
+              result:
+                request.method === 'sign_message'
+                  ? 'signature'
+                  : { JADE_VERSION: 'ble-test' }
+            })
           )
         });
       }
     };
     class FakeBleManager {
+      onStateChange(listener: (state: string) => void) {
+        listener('PoweredOn');
+        return subscription;
+      }
       async connectToDevice() {
         return device;
       }
@@ -141,9 +172,208 @@ describe('React Native Jade providers', () => {
         device: { transport: 'ble', deviceId: 'ble-device', name: 'Jade' }
       });
       assert.equal((await client.getVersionInfo())['JADE_VERSION'], 'ble-test');
+      assert.equal(
+        await client.signMessage([0x80000054, 0, 0], 'chunked '.repeat(60)),
+        'signature'
+      );
+      assert.ok(writes.length > 5);
+      assert.ok(writes.every(length => length <= 97));
       await client.disconnect();
       assert.equal(cancelled, 'ble-device');
       assert.equal(destroyed, true);
+    } finally {
+      Reflect.set(globalThis, 'require', previousRequire);
+    }
+  });
+
+  it('waits for Bluetooth and deduplicates discovered Jade devices', async () => {
+    let poweredOn = false;
+    let removed = false;
+    const cleanup: string[] = [];
+    class FakeBleManager {
+      onStateChange(listener: (state: string) => void) {
+        listener('Unknown');
+        setImmediate(() => {
+          poweredOn = true;
+          listener('PoweredOn');
+        });
+        return {
+          remove() {
+            removed = true;
+          }
+        };
+      }
+      async startDeviceScan(
+        _services: null,
+        _options: null,
+        listener: (error: null, device: object) => void
+      ) {
+        assert.equal(poweredOn, true);
+        listener(null, { id: 'other', name: 'Not Jade' });
+        listener(null, { id: 'jade', name: 'Jade', rssi: -80 });
+        listener(null, { id: 'jade', localName: 'Jade Plus', rssi: -40 });
+      }
+      async stopDeviceScan() {
+        cleanup.push('stop');
+      }
+      async destroy() {
+        cleanup.push('destroy');
+      }
+    }
+    const previousRequire = Reflect.get(globalThis, 'require');
+    Reflect.set(globalThis, 'require', (specifier: string) => {
+      if (specifier === 'react-native-ble-plx')
+        return { BleManager: FakeBleManager };
+      assert.equal(specifier, 'react-native');
+      return { Platform: { OS: 'ios' }, PermissionsAndroid: {} };
+    });
+    try {
+      assert.deepEqual(await discoverJadeBleDevices({ scanDurationMs: 10 }), [
+        { transport: 'ble', deviceId: 'jade', name: 'Jade Plus', rssi: -40 }
+      ]);
+      assert.equal(removed, true);
+      assert.deepEqual(cleanup, ['stop', 'destroy']);
+    } finally {
+      Reflect.set(globalThis, 'require', previousRequire);
+    }
+  });
+
+  it(
+    'handles asynchronous BLE scan failures and releases the manager',
+    { timeout: 1_000 },
+    async () => {
+      let destroyed = false;
+      class FakeBleManager {
+        onStateChange(listener: (state: string) => void) {
+          listener('PoweredOn');
+          return { remove() {} };
+        }
+        async startDeviceScan() {
+          throw new Error('native scan failed');
+        }
+        async stopDeviceScan() {
+          throw new Error('native stop failed');
+        }
+        async destroy() {
+          destroyed = true;
+        }
+      }
+      const previousRequire = Reflect.get(globalThis, 'require');
+      Reflect.set(globalThis, 'require', (specifier: string) => {
+        if (specifier === 'react-native-ble-plx')
+          return { BleManager: FakeBleManager };
+        assert.equal(specifier, 'react-native');
+        return { Platform: { OS: 'ios' }, PermissionsAndroid: {} };
+      });
+      try {
+        await assert.rejects(discoverJadeBleDevices(), /native scan failed/);
+        assert.equal(destroyed, true);
+      } finally {
+        Reflect.set(globalThis, 'require', previousRequire);
+      }
+    }
+  );
+
+  it('rejects a powered-off Bluetooth adapter without scanning', async () => {
+    let destroyed = false;
+    class FakeBleManager {
+      onStateChange(listener: (state: string) => void) {
+        listener('PoweredOff');
+        return { remove() {} };
+      }
+      async startDeviceScan() {
+        assert.fail('must not scan');
+      }
+      async stopDeviceScan() {}
+      async destroy() {
+        destroyed = true;
+      }
+    }
+    const previousRequire = Reflect.get(globalThis, 'require');
+    Reflect.set(globalThis, 'require', (specifier: string) => {
+      if (specifier === 'react-native-ble-plx')
+        return { BleManager: FakeBleManager };
+      assert.equal(specifier, 'react-native');
+      return { Platform: { OS: 'ios' }, PermissionsAndroid: {} };
+    });
+    try {
+      await assert.rejects(discoverJadeBleDevices(), /powered off/);
+      assert.equal(destroyed, true);
+    } finally {
+      Reflect.set(globalThis, 'require', previousRequire);
+    }
+  });
+
+  it('does not destroy a BLE manager already owned by another wallet', async () => {
+    const shared = {
+      onStateChange(listener: (state: string) => void) {
+        listener('PoweredOn');
+        return { remove() {} };
+      },
+      async startDeviceScan() {},
+      async stopDeviceScan() {},
+      async destroy() {
+        assert.fail('must not destroy the shared manager');
+      }
+    };
+    class FakeBleManager {
+      static sharedInstance = shared;
+      constructor() {
+        assert.fail('must reuse the shared manager');
+      }
+    }
+    const previousRequire = Reflect.get(globalThis, 'require');
+    Reflect.set(globalThis, 'require', (specifier: string) => {
+      if (specifier === 'react-native-ble-plx')
+        return { BleManager: FakeBleManager };
+      assert.equal(specifier, 'react-native');
+      return { Platform: { OS: 'ios' }, PermissionsAndroid: {} };
+    });
+    try {
+      assert.deepEqual(await discoverJadeBleDevices({ scanDurationMs: 1 }), []);
+    } finally {
+      Reflect.set(globalThis, 'require', previousRequire);
+    }
+  });
+
+  it('closes a failed BLE connection without destroying a shared manager', async () => {
+    let cancelled = '';
+    const shared = {
+      onStateChange(listener: (state: string) => void) {
+        listener('PoweredOn');
+        return { remove() {} };
+      },
+      async connectToDevice() {
+        return {
+          id: 'jade',
+          async discoverAllServicesAndCharacteristics() {
+            throw new Error('service discovery failed');
+          }
+        };
+      },
+      async cancelDeviceConnection(deviceId: string) {
+        cancelled = deviceId;
+      },
+      async destroy() {
+        assert.fail('must not destroy the shared manager');
+      }
+    };
+    class FakeBleManager {
+      static sharedInstance = shared;
+    }
+    const previousRequire = Reflect.get(globalThis, 'require');
+    Reflect.set(globalThis, 'require', (specifier: string) => {
+      if (specifier === 'react-native-ble-plx')
+        return { BleManager: FakeBleManager };
+      assert.equal(specifier, 'react-native');
+      return { Platform: { OS: 'ios' }, PermissionsAndroid: {} };
+    });
+    try {
+      await assert.rejects(
+        connectJadeBle({ device: { transport: 'ble', deviceId: 'jade' } }),
+        /service discovery failed/
+      );
+      assert.equal(cancelled, 'jade');
     } finally {
       Reflect.set(globalThis, 'require', previousRequire);
     }

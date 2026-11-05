@@ -45,7 +45,6 @@ export class JadeRpc {
     {
       resolve(response: JadeRpcResponse): void;
       reject(error: Error): void;
-      timer?: ReturnType<typeof setTimeout>;
     }
   >();
 
@@ -53,6 +52,7 @@ export class JadeRpc {
   private nextRequestId = 1;
   private operationTail: Promise<void> = Promise.resolve();
   private closed = false;
+  private closing: Promise<void> | undefined;
 
   constructor(transport: JadeTransport) {
     this.transport = transport;
@@ -88,12 +88,8 @@ export class JadeRpc {
     }, timeoutMs);
   }
 
-  async disconnect(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.unsubscribe();
-    this.rejectPending(new Error('Jade transport closed'));
-    await this.transport.close();
+  disconnect(): Promise<void> {
+    return this.close(new Error('Jade transport closed'));
   }
 
   private async request(
@@ -113,35 +109,51 @@ export class JadeRpc {
       (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
     )
       throw new Error('Jade RPC timeout must be a positive integer');
+    const message = encode({
+      id,
+      method,
+      ...(params !== undefined ? { params } : {})
+    });
+    let written = false;
+    let reply: JadeRpcResponse | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const response = new Promise<JadeRpcResponse>((resolve, reject) => {
-      const pending: {
-        resolve(response: JadeRpcResponse): void;
-        reject(error: Error): void;
-        timer?: ReturnType<typeof setTimeout>;
-      } = { resolve, reject };
+      this.pending.set(id, {
+        resolve: value => {
+          reply = value;
+          if (written) resolve(value);
+        },
+        reject
+      });
       if (timeoutMs !== null) {
-        pending.timer = setTimeout(() => {
+        timer = setTimeout(() => {
           this.fail(new Error(`Jade RPC ${method} timed out`));
         }, timeoutMs);
       }
-      this.pending.set(id, pending);
+
+      // A reply can arrive before the write finishes. Keep the request pending
+      // until both complete so timeout and disconnect still cancel a stuck write.
+      void Promise.resolve()
+        .then(() => this.transport.write(message))
+        .then(
+          () => {
+            written = true;
+            if (reply) resolve(reply);
+          },
+          error => this.fail(errorValue(error))
+        );
     });
 
     try {
-      await this.transport.write(
-        encode({
-          id,
-          method,
-          ...(params !== undefined ? { params } : {})
-        })
-      );
+      return await response;
     } catch (error) {
-      const pending = this.pending.get(id);
-      if (pending?.timer !== undefined) clearTimeout(pending.timer);
-      this.pending.delete(id);
+      // Do not let the next operation interleave with an unfinished write.
+      if (!written) this.fail(errorValue(error));
       throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      this.pending.delete(id);
     }
-    return response;
   }
 
   private receive(data: Uint8Array): void {
@@ -182,14 +194,10 @@ export class JadeRpc {
     if (response.error !== undefined) {
       if (!response.error || typeof response.error !== 'object') {
         pending.reject(new Error('Jade returned an invalid RPC error'));
-        this.pending.delete(response.id);
-        if (pending.timer !== undefined) clearTimeout(pending.timer);
         return;
       }
       const code = response.error.code;
       const message = response.error.message;
-      this.pending.delete(response.id);
-      if (pending.timer !== undefined) clearTimeout(pending.timer);
       pending.reject(
         new JadeRpcError({
           code: typeof code === 'number' ? code : -32603,
@@ -204,26 +212,27 @@ export class JadeRpc {
     }
     if (!Object.prototype.hasOwnProperty.call(response, 'result')) {
       pending.reject(new Error('Jade RPC response has no result'));
-      this.pending.delete(response.id);
-      if (pending.timer !== undefined) clearTimeout(pending.timer);
       return;
     }
-    this.pending.delete(response.id);
-    if (pending.timer !== undefined) clearTimeout(pending.timer);
     pending.resolve(response);
   }
 
   private fail(error: Error): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.unsubscribe();
-    this.rejectPending(error);
-    void this.transport.close().catch(() => undefined);
+    void this.close(error).catch(() => undefined);
+  }
+
+  private close(error: Error): Promise<void> {
+    if (!this.closing) {
+      this.closed = true;
+      this.unsubscribe();
+      this.rejectPending(error);
+      this.closing = Promise.resolve().then(() => this.transport.close());
+    }
+    return this.closing;
   }
 
   private rejectPending(error: Error): void {
     for (const request of this.pending.values()) {
-      if (request.timer !== undefined) clearTimeout(request.timer);
       request.reject(error);
     }
     this.pending.clear();

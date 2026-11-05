@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@bitcoinerlab/jade": "^0.1.0",
-    "@scure/base": "^2.0.0"
+    "@scure/base": "^2.4.0"
   },
   "peerDependencies": {
     "expo-modules-core": ">=2.0.0",
